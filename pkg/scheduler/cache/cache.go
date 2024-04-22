@@ -1049,7 +1049,40 @@ func (sc *SchedulerCache) processCleanupJob() {
 }
 
 func (sc *SchedulerCache) resyncTask(task *schedulingapi.TaskInfo) {
-	sc.errTasks.AddRateLimited(task)
+	key := sc.generateErrTaskKey(task)
+	sc.errTasks.AddRateLimited(key)
+}
+
+func (sc *SchedulerCache) generateErrTaskKey(task *schedulingapi.TaskInfo) string {
+	// Job UID is namespace + / +name, for example: theNs/theJob
+	// Task UID is derived from the Pod UID, for example: d336abea-4f14-42c7-8a6b-092959a31407
+	// In the example above, the key ultimately becomes: theNs/theJob/d336abea-4f14-42c7-8a6b-092959a31407
+	return fmt.Sprintf("%s/%s", task.Job, task.UID)
+}
+
+func (sc *SchedulerCache) parseErrTaskKey(key string) (*schedulingapi.TaskInfo, error) {
+	i := strings.LastIndex(key, "/")
+	if i == -1 {
+		return nil, fmt.Errorf("failed to split task key %s", key)
+	}
+
+	jobUID := key[:i]
+	taskUID := key[i+1:]
+
+	sc.Mutex.Lock()
+	defer sc.Mutex.Unlock()
+
+	job, found := sc.Jobs[schedulingapi.JobID(jobUID)]
+	if !found {
+		return nil, fmt.Errorf("failed to find job %s", jobUID)
+	}
+
+	task, found := job.Tasks[schedulingapi.TaskID(taskUID)]
+	if !found {
+		return nil, fmt.Errorf("failed to find task %s", taskUID)
+	}
+
+	return task, nil
 }
 
 func (sc *SchedulerCache) processResyncTask() {
@@ -1060,9 +1093,15 @@ func (sc *SchedulerCache) processResyncTask() {
 
 	defer sc.errTasks.Done(obj)
 
-	task, ok := obj.(*schedulingapi.TaskInfo)
+	taskKey, ok := obj.(string)
 	if !ok {
-		klog.Errorf("failed to convert %v to *schedulingapi.TaskInfo", obj)
+		klog.Errorf("Failed to convert %v to string.", obj)
+		return
+	}
+
+	task, err := sc.parseErrTaskKey(taskKey)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get task for sync task", "taskKey", taskKey)
 		return
 	}
 
