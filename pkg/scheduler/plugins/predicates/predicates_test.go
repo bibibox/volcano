@@ -9,6 +9,7 @@ import (
 
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/scheduler/actions/allocate"
+	"volcano.sh/volcano/pkg/scheduler/actions/backfill"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -106,6 +107,73 @@ func TestEventHandler(t *testing.T) {
 					{
 						Name:            priority.PluginName,
 						EnabledJobOrder: &trueValue,
+					},
+				},
+			},
+		}
+		t.Run(test.Name, func(t *testing.T) {
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run(actions)
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestNodeNum(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		PluginName: New,
+	}
+
+	// pending pods
+	w1 := util.BuildPod("ns1", "worker-1", "", apiv1.PodPending, nil, "pg1", map[string]string{"role": "worker"}, map[string]string{"selector": "worker"})
+	w2 := util.BuildPod("ns1", "worker-2", "", apiv1.PodPending, nil, "pg1", map[string]string{"role": "worker"}, map[string]string{})
+	w3 := util.BuildPod("ns1", "worker-3", "", apiv1.PodPending, nil, "pg2", map[string]string{"role": "worker"}, map[string]string{})
+
+	// nodes
+	n1 := util.BuildNode("node1", api.BuildResourceList("4", "4k", []api.ScalarResource{{Name: "pods", Value: "2"}}...), map[string]string{"selector": "worker"})
+
+	// priority
+	p1 := &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "p1"}, Value: 1}
+	p2 := &schedulingv1.PriorityClass{ObjectMeta: metav1.ObjectMeta{Name: "p2"}, Value: 2}
+
+	// podgroup
+	pg1 := util.BuildPodGroupWithPrio("pg1", "ns1", "q1", 2, nil, schedulingv1beta1.PodGroupInqueue, p2.Name)
+	pg2 := util.BuildPodGroupWithPrio("pg2", "ns1", "q1", 1, nil, schedulingv1beta1.PodGroupInqueue, p1.Name)
+
+	// queue
+	queue1 := util.BuildQueue("q1", 0, nil)
+
+	// tests
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name:      "pod-predicate",
+			Plugins:   plugins,
+			Pods:      []*apiv1.Pod{w1, w2, w3},
+			Nodes:     []*apiv1.Node{n1},
+			PriClass:  []*schedulingv1.PriorityClass{p1, p2},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg1, pg2},
+			Queues:    []*schedulingv1beta1.Queue{queue1},
+			ExpectBindMap: map[string]string{ // podKey -> node
+				"ns1/worker-1": "node1",
+				"ns1/worker-2": "node1",
+			},
+			ExpectBindsNum: 2,
+		},
+	}
+
+	for i, test := range tests {
+		// allocate
+		actions := []framework.Action{allocate.New(), backfill.New()}
+		trueValue := true
+		tiers := []conf.Tier{
+			{
+				Plugins: []conf.PluginOption{
+					{
+						Name:             PluginName,
+						EnabledPredicate: &trueValue,
 					},
 				},
 			},
