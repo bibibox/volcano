@@ -498,12 +498,16 @@ func (pp *predicatesPlugin) OnSessionOpen(ssn *framework.Session) {
 				status := podAffinityFilter.Filter(context.TODO(), state, task.Pod, nodeInfo)
 				podAffinityStatus := api.ConvertPredicateStatus(status)
 				if podAffinityStatus.Code != api.Success {
-					// TODO: Currently, preemption is not supported when Pod affinity filtering fails.
-					// Once supported, the logic here should be removed.
-					// See https://github.com/volcano-sh/volcano/issues/3845
-					podAffinityStatus.Code = api.UnschedulableAndUnresolvable
+					// // TODO: Currently, preemption is not supported when Pod affinity filtering fails.
+					// // Once supported, the logic here should be removed.
+					// // See https://github.com/volcano-sh/volcano/issues/3845
+					// podAffinityStatus.Code = api.UnschedulableAndUnresolvable
+					// predicateStatus = append(predicateStatus, podAffinityStatus)
+					// return api.NewFitErrWithStatus(task, node, predicateStatus...)
 					predicateStatus = append(predicateStatus, podAffinityStatus)
-					return api.NewFitErrWithStatus(task, node, predicateStatus...)
+					if ShouldAbort(podAffinityStatus) {
+						return api.NewFitErrWithStatus(task, node, predicateStatus...)
+					}
 				}
 			}
 		}

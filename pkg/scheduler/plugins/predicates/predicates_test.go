@@ -6,10 +6,12 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/scheduler/actions/allocate"
 	"volcano.sh/volcano/pkg/scheduler/actions/backfill"
+	"volcano.sh/volcano/pkg/scheduler/actions/preempt"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -56,7 +58,7 @@ func TestEventHandler(t *testing.T) {
 	w3.Spec.Affinity = getWorkerAffinity()
 
 	// nodes
-	n1 := util.BuildNode("node1", api.BuildResourceList("4", "4k", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{"selector": "worker"})
+	n1 := util.BuildNode("node1", api.BuildResourceList("14", "14k", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{"selector": "worker"})
 	n2 := util.BuildNode("node2", api.BuildResourceList("3", "3k", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{})
 	n1.Labels["kubernetes.io/hostname"] = "node1"
 	n2.Labels["kubernetes.io/hostname"] = "node2"
@@ -178,6 +180,84 @@ func TestNodeNum(t *testing.T) {
 				},
 			},
 		}
+		t.Run(test.Name, func(t *testing.T) {
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run(actions)
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestPodAntiAffinity(t *testing.T) {
+	var k klog.Level
+	k.Set("5")
+	plugins := map[string]framework.PluginBuilder{
+		PluginName:          New,
+		priority.PluginName: priority.New,
+	}
+	highPrio := util.BuildPriorityClass("high-priority", 100000)
+	lowPrio := util.BuildPriorityClass("low-priority", 10)
+
+	w1 := util.BuildPodWithPriority("ns1", "worker-1", "n1", apiv1.PodRunning, api.BuildResourceList("3", "3G"), "pg1", map[string]string{"role": "worker"}, map[string]string{}, &highPrio.Value)
+	w2 := util.BuildPodWithPriority("ns1", "worker-2", "n1", apiv1.PodRunning, api.BuildResourceList("3", "3G"), "pg1", map[string]string{schedulingv1beta1.PodPreemptable: "true"}, map[string]string{}, &lowPrio.Value)
+	w3 := util.BuildPodWithPriority("ns1", "worker-3", "", apiv1.PodPending, api.BuildResourceList("3", "3G"), "pg2", map[string]string{"role": "worker"}, map[string]string{}, &highPrio.Value)
+	w1.Spec.Affinity = getWorkerAffinity()
+	w3.Spec.Affinity = getWorkerAffinity()
+
+	// nodes
+	n1 := util.BuildNode("node1", api.BuildResourceList("12", "12G", []api.ScalarResource{{Name: "pods", Value: "2"}}...), map[string]string{})
+	// n2 := util.BuildNode("node2", api.BuildResourceList("3", "3k", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{})
+	n1.Labels["kubernetes.io/hostname"] = "node1"
+	// n2.Labels["kubernetes.io/hostname"] = "node2"
+
+	// podgroup
+	pg1 := util.BuildPodGroupWithPrio("pg1", "ns1", "q1", 0, nil, schedulingv1beta1.PodGroupRunning, lowPrio.Name)
+	pg2 := util.BuildPodGroupWithPrio("pg2", "ns1", "q1", 1, map[string]int32{"": 1}, schedulingv1beta1.PodGroupInqueue, highPrio.Name)
+
+	// queue
+	queue1 := util.BuildQueue("q1", 0, api.BuildResourceList("9", "9G"))
+
+	// tests
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name:      "pod-anti-affinity",
+			Plugins:   plugins,
+			Pods:      []*apiv1.Pod{w1, w2, w3},
+			Nodes:     []*apiv1.Node{n1},
+			PriClass:  []*schedulingv1.PriorityClass{lowPrio, highPrio},
+			PodGroups: []*schedulingv1beta1.PodGroup{pg1, pg2},
+			Queues:    []*schedulingv1beta1.Queue{queue1},
+			ExpectBindMap: map[string]string{ // podKey -> node
+				"ns1/worker-3": "node1",
+			},
+			ExpectBindsNum: 1,
+			ExpectEvicted:  []string{},
+			ExpectEvictNum: 0,
+		},
+	}
+
+	for i, test := range tests {
+		// allocate
+		actions := []framework.Action{allocate.New(), preempt.New()}
+		trueValue := true
+		tiers := []conf.Tier{
+			{
+				Plugins: []conf.PluginOption{
+					{
+						Name:             PluginName,
+						EnabledPredicate: &trueValue,
+					},
+					{
+						Name:               priority.PluginName,
+						EnabledPreemptable: &trueValue,
+					},
+				},
+			},
+		}
+		test.PriClass = []*schedulingv1.PriorityClass{highPrio, lowPrio}
 		t.Run(test.Name, func(t *testing.T) {
 			test.RegisterSession(tiers, nil)
 			defer test.Close()
